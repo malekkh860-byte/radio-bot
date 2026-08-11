@@ -1,14 +1,15 @@
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, render_template_string
 from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 state = {
     "is_broadcasting": False,
-    "speak_requested": False,
-    "chat_requested": False,
     "speak_granted": False,
     "chat_granted": False,
     "listener_name": ""
@@ -232,7 +233,6 @@ host_html = """
     <h1>لوحة تحكم المذيع</h1>
     
     <div>
-        <!-- زر بدء البث سيطلب إذن الميكروفون فوراً -->
         <button class="btn btn-start" onclick="startBroadcast()">بدء البث الصوتي</button>
         <button class="btn btn-stop" onclick="stopBroadcast()">إيقاف البث</button>
     </div>
@@ -243,7 +243,7 @@ host_html = """
     <div id="notification" class="notification">لا توجد طلبات جديدة حالياً</div>
     
     <div id="action_area_speak" style="display:none;">
-        <button class="btn btn-accept" onclick="grantSpeak()">قبول طلب التحدث (مكالمة صوتية)</button>
+        <button class="btn btn-accept" onclick="grantSpeak()">قبول طلب التحدث</button>
     </div>
 
     <div id="action_area_chat" style="display:none;">
@@ -277,7 +277,7 @@ host_html = """
                     hostMediaRecorder.start(200);
                 })
                 .catch(err => {
-                    alert("يجب السماح للمتصفح بالوصول للميكروفون ليتم بدء البث: " + err);
+                    alert("يجب السماح للمتصفح بالوصول للميكروفون لبدء البث: " + err);
                 });
         }
 
@@ -421,8 +421,6 @@ def handle_host_audio(audio_data):
 def handle_end_conv():
     state['speak_granted'] = False
     state['chat_granted'] = False
-    state['speak_requested'] = False
-    state['chat_requested'] = False
     emit('conversation_ended', broadcast=True)
 
 if __name__ == '__main__':
