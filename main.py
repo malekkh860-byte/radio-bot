@@ -80,6 +80,8 @@ listener_html = """
         const socket = io();
         let currentType = '';
         let mediaRecorder;
+        let audioQueue = [];
+        let isPlayingAudio = false;
 
         function startListeningStream() {
             const player = document.getElementById('listenerAudioPlayer');
@@ -118,9 +120,11 @@ listener_html = """
                         
                         mediaRecorder = new MediaRecorder(stream);
                         mediaRecorder.ondataavailable = event => {
-                            socket.emit('audio_from_listener', event.data);
+                            if (event.data.size > 0) {
+                                socket.emit('audio_from_listener', event.data);
+                            }
                         };
-                        mediaRecorder.start(200);
+                        mediaRecorder.start(500);
                     })
                     .catch(err => {
                         alert("تعذر الوصول للميكروفون: " + err);
@@ -183,11 +187,27 @@ listener_html = """
 
         socket.on('receive_audio_from_host', (arrayBuffer) => {
             const blob = new Blob([arrayBuffer], { type: 'audio/webm' });
+            audioQueue.push(blob);
+            playQueue();
+        });
+
+        function playQueue() {
+            if (isPlayingAudio || audioQueue.length === 0) return;
+            isPlayingAudio = true;
+            const blob = audioQueue.shift();
             const audioUrl = URL.createObjectURL(blob);
             const player = document.getElementById('listenerAudioPlayer');
             player.src = audioUrl;
-            player.play().catch(e => console.log("بانتظار تفاعل المستخدم"));
-        });
+            player.play().then(() => {
+                player.onended = () => {
+                    isPlayingAudio = false;
+                    playQueue();
+                };
+            }).catch(e => {
+                isPlayingAudio = false;
+                playQueue();
+            });
+        }
 
         socket.on('conversation_ended', () => {
             document.getElementById('status').innerText = "تم إنهاء المحادثة.";
@@ -264,6 +284,8 @@ host_html = """
     <script>
         const socket = io();
         let hostMediaRecorder;
+        let hostAudioQueue = [];
+        let isHostPlayingAudio = false;
 
         function startBroadcast() {
             navigator.mediaDevices.getUserMedia({ audio: true })
@@ -272,9 +294,11 @@ host_html = """
                     
                     hostMediaRecorder = new MediaRecorder(stream);
                     hostMediaRecorder.ondataavailable = event => {
-                        socket.emit('audio_from_host', event.data);
+                        if (event.data.size > 0) {
+                            socket.emit('audio_from_host', event.data);
+                        }
                     };
-                    hostMediaRecorder.start(200);
+                    hostMediaRecorder.start(500);
                 })
                 .catch(err => {
                     alert("يجب السماح للمتصفح بالوصول للميكروفون لبدء البث: " + err);
@@ -349,11 +373,27 @@ host_html = """
 
         socket.on('receive_audio_from_listener', (arrayBuffer) => {
             const blob = new Blob([arrayBuffer], { type: 'audio/webm' });
+            hostAudioQueue.push(blob);
+            playHostQueue();
+        });
+
+        function playHostQueue() {
+            if (isHostPlayingAudio || hostAudioQueue.length === 0) return;
+            isHostPlayingAudio = true;
+            const blob = hostAudioQueue.shift();
             const audioUrl = URL.createObjectURL(blob);
             const player = document.getElementById('hostAudioPlayer');
             player.src = audioUrl;
-            player.play().catch(e => console.log("بانتظار تفاعل المستخدم"));
-        });
+            player.play().then(() => {
+                player.onended = () => {
+                    isHostPlayingAudio = false;
+                    playHostQueue();
+                };
+            }).catch(e => {
+                isHostPlayingAudio = false;
+                playHostQueue();
+            });
+        }
 
         socket.on('conversation_ended', () => {
             document.getElementById('notification').innerText = "تم إنهاء المحادثة.";
@@ -411,18 +451,10 @@ def handle_chat_message(data):
 
 @socketio.on('audio_from_listener')
 def handle_listener_audio(audio_data):
-    emit('receive_audio_from_listener', audio_data, broadcast=True, include_self=False)
+    emit('receive_audio_from_host', audio_data, broadcast=True, include_self=False)
 
 @socketio.on('audio_from_host')
 def handle_host_audio(audio_data):
-    emit('receive_audio_from_host', audio_data, broadcast=True, include_self=False)
+    emit('receive_audio_from_listener', audio_data, broadcast=True, include_self=False)
 
-@socketio.on('end_conversation')
-def handle_end_conv():
-    state['speak_granted'] = False
-    state['chat_granted'] = False
-    emit('conversation_ended', broadcast=True)
-
-if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000)
-    
+@socketio.on('end_conversatio
