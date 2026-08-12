@@ -148,12 +148,8 @@ CLIENT_PARAMS = {
     'auto_reconnect': True,
 }
 
-client = TelegramClient(
-    StringSession(os.environ.get('SESSION_STRING', '')),
-    API_ID,
-    API_HASH,
-    **CLIENT_PARAMS,
-)
+SESSION_STR = os.environ.get('SESSION_STRING', '')
+client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH, **CLIENT_PARAMS)
 sytc_bot = TelegramClient('session_sytcbot', API_ID, API_HASH, **CLIENT_PARAMS)
 
 USER_MODES = {}
@@ -630,34 +626,37 @@ async def main():
   # 1. تشغيل خادم الراديو Flask في خيط منفصل (Daemon Thread)
   threading.Thread(target=run_flask_server, daemon=True).start()
 
-  # 2. جلب عنوان IP المحلي لعرض روابط الاستماع للراديو
-  try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(('8.8.8.8', 80))
-    ip = s.getsockname()[0]
-    s.close()
-  except Exception:
-    ip = '127.0.0.1'
-
-  print('✅ النظام يعمل!')
+  print('✅ سيرفر الراديو يعمل بنجاح!')
   print(f'🎙️ لوحة المذيع (البث الفوري): {HOST_URL}')
   print(f'🎧 صفحة المستمعين: {RADIO_URL}')
 
-  # 3. تشغيل عملاء تيليجرام
-  await client.start()
-  await sytc_bot.start(bot_token=TOKEN_SYTC_BOT)
-  print('✅ تم تشغيل الحسابات بنجاح.')
+  # 2. تشغيل عميل الحساب الشخصي بحذر لمنع إنهيار السيرفر
+  if SESSION_STR:
+    try:
+      await client.connect()
+      if not await client.is_user_authorized():
+        print('⚠️ تنبيه: كود SESSION_STRING غير صالح أو يتطلب إدخال رقم كود، يرجى استبداله.')
+      else:
+        print('✅ تم اتصال حساب المستخدم بنجاح.')
+        asyncio.create_task(process_truecaller_queue())
+        await catch_up_missed_messages()
+    except Exception as e:
+      print(f'❌ خطأ أثناء تسجيل دخول الحساب الشخصي: {e}')
+  else:
+    print('⚠️ تنبيه: لم يتم إضافة SESSION_STRING في متغيرات البيئة.')
 
-  # 4. تشغيل طابور Truecaller واستدراك الرسائل الفائتة
-  asyncio.create_task(process_truecaller_queue())
-  await catch_up_missed_messages()
+  # 3. تشغيل بوت تيليجرام
+  try:
+    await sytc_bot.start(bot_token=TOKEN_SYTC_BOT)
+    print('✅ تم تشغيل بوت تيليجرام بنجاح.')
+  except Exception as e:
+    print(f'❌ خطأ أثناء تشغيل بوت تيليجرام: {e}')
 
-  print('✅ النظام يعمل وجاهز لتلقي الرسائل والأوامر وطابور الانتظار نشط...')
+  print('✅ النظام يعمل بدون مشاكل وجاهز لاستقبال الطلبات.')
 
-  await asyncio.gather(
-      client.run_until_disconnected(), sytc_bot.run_until_disconnected()
-  )
-
+  # الحفاظ على تشغيل السيرفر باستمرار
+  while True:
+    await asyncio.sleep(3600)
 
 if __name__ == '__main__':
   asyncio.run(main())
