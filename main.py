@@ -54,7 +54,7 @@ async def lang_handler(update, context):
     kb = [[InlineKeyboardButton(LANGS[lang]['btn_open'], web_app=WebAppInfo(url=webapp_url))]]
     await query.edit_message_text(text="تم اختيار اللغة! / Language selected!", reply_markup=InlineKeyboardMarkup(kb))
 
-# --- تشغيل البوت عبر asyncio المباشر بدون run_polling تفادياً لإشارات النظام ---
+# --- تشغيل البوت عبر asyncio المباشر لتفادي أخطاء الإشارات ---
 async def start_bot_async():
     if not TELEGRAM_TOKEN:
         return
@@ -80,4 +80,3 @@ if __name__ == '__main__':
 
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host='0.0.0.0', port=port)
-    
