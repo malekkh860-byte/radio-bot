@@ -7,7 +7,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'malek_khalouf_secure_key'
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # إعدادات التلجرام
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -54,18 +54,23 @@ async def lang_handler(update, context):
     kb = [[InlineKeyboardButton(LANGS[lang]['btn_open'], web_app=WebAppInfo(url=webapp_url))]]
     await query.edit_message_text(text="تم اختيار اللغة! / Language selected!", reply_markup=InlineKeyboardMarkup(kb))
 
-if __name__ == '__main__':
-    # 1. تشغيل سيرفر Flask في الخلفية
-    port = int(os.environ.get("PORT", 5000))
-    flask_thread = threading.Thread(
-        target=lambda: socketio.run(app, host='0.0.0.0', port=port),
-        daemon=True
-    )
-    flask_thread.start()
+def run_bot():
+    if not TELEGRAM_TOKEN:
+        return
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(lang_handler, pattern="^lang_"))
+    
+    # استخدام stop_signals=None لمنع خطأ الإشارات في الخيوط الجانبية
+    application.run_polling(stop_signals=None)
 
-    # 2. تشغيل بوت تلجرام في الخيط الرئيسي (Main Thread) لتجنب الخطأ
+if __name__ == '__main__':
+    # تشغيل بوت تلجرام في خيط خلفي مستقل
     if TELEGRAM_TOKEN:
-        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(lang_handler, pattern="^lang_"))
-        application.run_polling()
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+    
+    # تشغيل سيرفر الويب في الخيط الرئيسي
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host='0.0.0.0', port=port)
+    
