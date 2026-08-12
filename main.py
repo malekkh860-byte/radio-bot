@@ -1,4 +1,4 @@
-import asyncio
+asyncio
 from datetime import datetime
 import json
 import logging
@@ -356,8 +356,6 @@ async def process_truecaller_queue():
         loop = asyncio.get_running_loop()
         handler_fut = loop.create_future()
 
-        @client.on(events.MessageEdited(chats=TRUECALLER_BOT))
-        @client.on(events.NewMessage(chats=TRUECALLER_BOT))
         async def truecaller_handler(event):
           text = event.message.text or ''
           if any(
@@ -368,7 +366,12 @@ async def process_truecaller_queue():
           if not handler_fut.done():
             handler_fut.set_result(text)
 
-        client.add_event_handler(truecaller_handler)
+        client.add_event_handler(
+            truecaller_handler, events.NewMessage(chats=TRUECALLER_BOT)
+        )
+        client.add_event_handler(
+            truecaller_handler, events.MessageEdited(chats=TRUECALLER_BOT)
+        )
 
         try:
           await client.send_message(TRUECALLER_BOT, phone_number)
@@ -380,7 +383,12 @@ async def process_truecaller_queue():
           await asyncio.sleep(e.seconds)
           fut.set_result(None)
         finally:
-          client.remove_event_handler(truecaller_handler)
+          client.remove_event_handler(
+              truecaller_handler, events.NewMessage(chats=TRUECALLER_BOT)
+          )
+          client.remove_event_handler(
+              truecaller_handler, events.MessageEdited(chats=TRUECALLER_BOT)
+          )
 
         await asyncio.sleep(2)
       except Exception as e:
