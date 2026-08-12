@@ -2,5 +2,4 @@ flask
 flask-socketio
 python-telegram-bot
 requests
-simple-websocket
-eventlet
+gunicorn
