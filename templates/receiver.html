@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}" dir="{% if lang == 'en' %}ltr{% else %}rtl{% endif %}">
+<head>
+    <meta charset="UTF-8">
+    <title>محطة مالك خلوف الإذاعية</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.2/socket.io.js"></script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body { font-family: Tahoma, sans-serif; background: #0f172a; color: #fff; text-align: center; padding: 20px; }
+        .container { max-width: 600px; margin: auto; background: #1e293b; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        h1 { color: #38bdf8; }
+        .box { margin: 15px 0; padding: 10px; background: #334155; border-radius: 8px; }
+        input, button { padding: 10px; margin: 5px; border-radius: 6px; border: none; font-size: 16px; width: 90%; }
+        button { cursor: pointer; background: #22c55e; color: #fff; font-weight: bold; }
+        button.talk { background: #f59e0b; }
+        button.stop { background: #ef4444; }
+        
+        .visualizer { display: flex; justify-content: center; align-items: flex-end; height: 50px; gap: 4px; margin-top: 15px; }
+        .bar { width: 10px; background: #38bdf8; height: 10px; border-radius: 4px; transition: height 0.05s ease; }
+
+        #chat-box { height: 150px; overflow-y: auto; background: #0f172a; padding: 10px; text-align: right; border-radius: 6px; margin-top: 10px; }
+        .msg { margin: 5px 0; padding: 5px; background: #1e293b; border-radius: 4px; text-align: right; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>محطة مالك خلوف الإذاعية</h1>
+        
+        <div class="box">
+            <h3>{% if lang == 'en' %}Live Stream{% elif lang == 'zh' %}直播{% else %}البث الحي{% endif %}</h3>
+            <button onclick="startListening()">{% if lang == 'en' %}Listen 🔊{% elif lang == 'zh' %}收听 🔊{% else %}تشغيل الصوت 🔊{% endif %}</button>
+            
+            <div class="visualizer">
+                <div class="bar" id="r1"></div><div class="bar" id="r2"></div>
+                <div class="bar" id="r3"></div><div class="bar" id="r4"></div>
+                <div class="bar" id="r5"></div>
+            </div>
+        </div>
+
+        <div class="box">
+            <input type="text" id="username" placeholder="{% if lang == 'en' %}Your Name{% elif lang == 'zh' %}名字{% else %}اسمك الكريم{% endif %}">
+            <input type="text" id="msgInput" placeholder="{% if lang == 'en' %}Message...{% elif lang == 'zh' %}消息...{% else %}الرسالة...{% endif %}">
+            <button onclick="sendMessage()">{% if lang == 'en' %}Send{% elif lang == 'zh' %}发送{% else %}إرسال{% endif %}</button>
+            <button class="talk" onclick="requestTalk()">{% if lang == 'en' %}Request to Talk 🔔{% elif lang == 'zh' %}请求发言 🔔{% else %}طلب التكلم 🔔{% endif %}</button>
+        </div>
+
+        <div id="chat-box"></div>
+    </div>
+
+    <script>
+        const socket = io();
+        let audioCtx, analyser;
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+
+        function startListening() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            alert("Ready!");
+        }
+
+        socket.on('audio_stream', async (arrayBuffer) => {
+            if (!audioCtx) return;
+            try {
+                let decodedAudio = await audioCtx.decodeAudioData(arrayBuffer);
+                let source = audioCtx.createBufferSource();
+                source.buffer = decodedAudio;
+                
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 64;
+                source.connect(analyser);
+                analyser.connect(audioCtx.destination);
+                
+                let dataArray = new Uint8Array(analyser.frequencyBinCount);
+                analyser.getByteFrequencyData(dataArray);
+                
+                document.getElementById('r1').style.height = (dataArray[2]/2)+'px';
+                document.getElementById('r3').style.height = (dataArray[6]/2)+'px';
+                document.getElementById('r5').style.height = (dataArray[10]/2)+'px';
+
+                source.start(0);
+            } catch (e) { console.log(e); }
+        });
+
+        function sendMessage() {
+            let name = document.getElementById('username').value;
+            let msg = document.getElementById('msgInput').value;
+            socket.emit('send_message', { name: name, text: msg });
+        }
+
+        function requestTalk() {
+            let name = document.getElementById('username').value || "Guest";
+            fetch('/api/request-talk', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ name: name, lang: '{{ lang }}' })
+            }).then(() => alert("Request Sent!"));
+        }
+
+        socket.on('receive_message', (data) => {
+            let box = document.getElementById('chat-box');
+            box.innerHTML += `<div class="msg"><strong>${data.name}:</strong> ${data.text}</div>`;
+        });
+    </script>
+</body>
+</html>
+
