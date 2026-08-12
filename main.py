@@ -1,4 +1,5 @@
 import os
+import asyncio
 import threading
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
@@ -39,7 +40,7 @@ def handle_audio(data):
 def handle_message(data):
     emit('receive_message', data, broadcast=True)
 
-# --- منطق البوت ---
+# --- أوامر البوت ---
 async def start(update, context):
     kb = [[InlineKeyboardButton("العربية 🇸🇦", callback_data="lang_ar"),
            InlineKeyboardButton("English 🇬🇧", callback_data="lang_en"),
@@ -53,19 +54,30 @@ async def lang_handler(update, context):
     kb = [[InlineKeyboardButton(LANGS[lang]['btn_open'], web_app=WebAppInfo(url=webapp_url))]]
     await query.edit_message_text(text="تم اختيار اللغة! / Language selected!", reply_markup=InlineKeyboardMarkup(kb))
 
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host='0.0.0.0', port=port, use_reloader=False, allow_unsafe_werkzeug=True)
+# --- تشغيل البوت عبر asyncio المباشر بدون run_polling تفادياً لإشارات النظام ---
+async def start_bot_async():
+    if not TELEGRAM_TOKEN:
+        return
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(lang_handler, pattern="^lang_"))
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    while True:
+        await asyncio.sleep(3600)
+
+def run_bot_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_bot_async())
 
 if __name__ == '__main__':
-    # 1. تشغيل خادم الويب في الخلفية
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    # 2. تشغيل بوت تلجرام في الخيط الرئيسي (Main Thread) لضمان الاستقرار التام وعدم توقف النشر
     if TELEGRAM_TOKEN:
-        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(lang_handler, pattern="^lang_"))
-        application.run_polling()
-        
+        threading.Thread(target=run_bot_thread, daemon=True).start()
+
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host='0.0.0.0', port=port)
+    
