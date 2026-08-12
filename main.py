@@ -1,5 +1,11 @@
 import os
 import threading
+import asyncio
+import tracemalloc
+
+# تفعيل تتبع الذاكرة للتخلص من التحذير
+tracemalloc.start()
+
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -7,9 +13,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'malek_khalouf_secure_key'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# إعدادات التلجرام
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID")
 
@@ -54,23 +59,25 @@ async def lang_handler(update, context):
     kb = [[InlineKeyboardButton(LANGS[lang]['btn_open'], web_app=WebAppInfo(url=webapp_url))]]
     await query.edit_message_text(text="تم اختيار اللغة! / Language selected!", reply_markup=InlineKeyboardMarkup(kb))
 
-def run_bot():
+def run_bot_thread():
     if not TELEGRAM_TOKEN:
         return
+    # تعيين Event Loop مستقرة ومستقلة للخيط الجانبي
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(lang_handler, pattern="^lang_"))
     
-    # استخدام stop_signals=None لمنع خطأ الإشارات في الخيوط الجانبية
-    application.run_polling(stop_signals=None)
+    # تشغيل الاستعلام بدون ربط إشارات النظام لمنع الأخطاء
+    application.run_polling(stop_signals=None, close_loop=False)
 
 if __name__ == '__main__':
-    # تشغيل بوت تلجرام في خيط خلفي مستقل
     if TELEGRAM_TOKEN:
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread = threading.Thread(target=run_bot_thread, daemon=True)
         bot_thread.start()
     
-    # تشغيل سيرفر الويب في الخيط الرئيسي
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host='0.0.0.0', port=port)
     
