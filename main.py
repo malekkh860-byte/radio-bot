@@ -112,6 +112,8 @@ API_ID = 35522856
 API_HASH = '8cf9c2d13140fdee3e902d62b6bb987d'
 TOKEN_SYTC_BOT = '8660058763:AAFPQZ2oKw37qRamSRyObLBvfVGsj-0CHoQ'
 WEB_APP_URL = 'https://malekkh860.pythonanywhere.com'
+RADIO_URL = 'https://radionetsy.up.railway.app'
+HOST_URL = 'https://radionetsy.up.railway.app/host'
 
 TRUECALLER_BOT = '@TrueCalleRobot'
 ADMIN_ID = 8262756069
@@ -145,7 +147,6 @@ CLIENT_PARAMS = {
     'auto_reconnect': True,
 }
 
-# استخدام StringSession لجلب الجلسة من متغير البيئة SESSION_STRING لمنع مشاكل الملفات على Railway
 client = TelegramClient(
     StringSession(os.environ.get('SESSION_STRING', '')),
     API_ID,
@@ -156,11 +157,8 @@ sytc_bot = TelegramClient('session_sytcbot', API_ID, API_HASH, **CLIENT_PARAMS)
 
 USER_MODES = {}
 
-# أقفال التزامن
 file_lock = asyncio.Lock()
 truecaller_lock = asyncio.Lock()
-
-# طابور الانتظار لطلبات Truecaller
 truecaller_queue = asyncio.Queue()
 
 FOOTER_TEXT = (
@@ -334,6 +332,7 @@ def get_main_keyboard():
   return [
       [Button.inline('💎 احصل على تلجرام مميز', b'btn_premium')],
       [Button.inline('🔍 البحث عن معلومات رقم', b'btn_truecaller')],
+      [Button.url('📻 الاستماع للبث المباشر', RADIO_URL)],
       [KeyboardButtonWebView('🌐 كشف عنوان الـ IP ومعلوماتك', WEB_APP_URL)],
       [
           Button.url(
@@ -417,7 +416,7 @@ async def fetch_truecaller_info_queued(phone_number: str) -> str:
 # [ CATCH-UP LOGIC ]
 # =======================================================
 async def catch_up_missed_messages():
-  print('🔍 جاري فحص الرسائل التي فاتت أثناء توقف البوت...')
+  print('🔍 جاري فحص الرسائل التي فاتت أثناء توقف النظام...')
   last_ids = await load_state()
   for source in SOURCES:
     try:
@@ -591,7 +590,7 @@ async def sytc_bot_message_handler(event):
             sender_id,
             username,
             first_name,
-            'بدء استخدام البوت (/start)',
+            'بدء استخدام النظام (/start)',
             get_country_name(str(sender_id)),
         )
     )
@@ -625,7 +624,7 @@ async def sytc_bot_message_handler(event):
 # [ MAIN STARTUP ]
 # =======================================================
 async def main():
-  print('🚀 جاري بدء تشغيل النظام الشامل (الراديو + البوتات)...')
+  print('🚀 جاري بدء تشغيل النظام الشامل (الراديو + الخدمات)...')
 
   # 1. تشغيل خادم الراديو Flask في خيط منفصل (Daemon Thread)
   threading.Thread(target=run_flask_server, daemon=True).start()
@@ -640,19 +639,19 @@ async def main():
     ip = '127.0.0.1'
 
   print('✅ النظام يعمل!')
-  print(f'🎙️ لوحة المذيع (البث الفوري): http://127.0.0.1:5000/host')
-  print(f'🎧 صفحة المستمعين: http://{ip}:5000')
+  print(f'🎙️ لوحة المذيع (البث الفوري): {HOST_URL}')
+  print(f'🎧 صفحة المستمعين: {RADIO_URL}')
 
   # 3. تشغيل عملاء تيليجرام
   await client.start()
   await sytc_bot.start(bot_token=TOKEN_SYTC_BOT)
-  print('✅ تم تشغيل بوتات تيليجرام بنجاح.')
+  print('✅ تم تشغيل الحسابات بنجاح.')
 
   # 4. تشغيل طابور Truecaller واستدراك الرسائل الفائتة
   asyncio.create_task(process_truecaller_queue())
   await catch_up_missed_messages()
 
-  print('✅ البوت يعمل وجاهز لتلقي الرسائل والأوامر وطابور الانتظار نشط...')
+  print('✅ النظام يعمل وجاهز لتلقي الرسائل والأوامر وطابور الانتظار نشط...')
 
   await asyncio.gather(
       client.run_until_disconnected(), sytc_bot.run_until_disconnected()
