@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head><meta charset="UTF-8"><title>لوحة المذيع</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.2/socket.io.js"></script>
+<style>body{background:#0f172a;color:#fff;text-align:center;padding:20px;font-family:Tahoma}.container{max-width:500px;margin:auto;background:#1e293b;padding:20px;border-radius:10px}button{padding:15px;margin:10px;cursor:pointer;border-radius:5px;border:none}.start{background:#22c55e}.stop{background:#ef4444}.visualizer{display:flex;justify-content:center;gap:5px;height:50px;align-items:flex-end} .bar{width:10px;height:5px;background:#38bdf8}</style>
+</head>
+<body>
+    <div class="container">
+        <h1>لوحة المذيع</h1>
+        <button class="start" onclick="startBroadcast()">بدء البث 🎙️</button>
+        <button class="stop" onclick="stopBroadcast()">إيقاف ⏹️</button>
+        <div class="visualizer"><div class="bar" id="b1"></div><div class="bar" id="b2"></div><div class="bar" id="b3"></div></div>
+    </div>
+<script>
+const socket = io();
+let isBroadcasting = false;
+async function startBroadcast() {
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (e) => { if(isBroadcasting) socket.emit('audio_data', e.data); };
+    recorder.start(200);
+    isBroadcasting = true;
+}
+function stopBroadcast() { isBroadcasting = false; location.reload(); }
+</script>
+</body>
+</html>
+
