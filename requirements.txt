@@ -1,3 +1,6 @@
-telethon
 flask
-phonenumbers
+flask-socketio
+python-telegram-bot
+requests
+simple-websocket
+eventlet
