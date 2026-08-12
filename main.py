@@ -1,5 +1,6 @@
 import os
 import threading
+import asyncio
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -7,8 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'malek_khalouf_secure_key'
-# تحديد وضع التزامن ليتوافق مع العمل في الخلفية
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID")
@@ -40,7 +40,7 @@ def handle_audio(data):
 def handle_message(data):
     emit('receive_message', data, broadcast=True)
 
-# --- منطق البوت ---
+# --- أوامر البوت ---
 async def start(update, context):
     kb = [[InlineKeyboardButton("العربية 🇸🇦", callback_data="lang_ar"),
            InlineKeyboardButton("English 🇬🇧", callback_data="lang_en"),
@@ -54,24 +54,29 @@ async def lang_handler(update, context):
     kb = [[InlineKeyboardButton(LANGS[lang]['btn_open'], web_app=WebAppInfo(url=webapp_url))]]
     await query.edit_message_text(text="تم اختيار اللغة! / Language selected!", reply_markup=InlineKeyboardMarkup(kb))
 
-# وظيفة تشغيل السيرفر في الخلفية
-def run_flask_server():
-    port = int(os.environ.get("PORT", 5000))
-    # use_reloader=False و allow_unsafe_werkzeug=True ضروريان جداً لعمل السيرفر خارج الخيط الرئيسي
-    socketio.run(app, host='0.0.0.0', port=port, use_reloader=False, allow_unsafe_werkzeug=True)
+# --- تشغيل البوت بدون add_signal_handler ---
+async def start_bot_async():
+    if not TELEGRAM_TOKEN:
+        return
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(lang_handler, pattern="^lang_"))
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    while True:
+        await asyncio.sleep(3600)
+
+def run_bot_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_bot_async())
 
 if __name__ == '__main__':
-    # 1. تشغيل خادم الراديو والويب في خيط خلفي (Background Thread)
-    flask_thread = threading.Thread(target=run_flask_server, daemon=True)
-    flask_thread.start()
-
-    # 2. تشغيل بوت تلجرام في الخيط الرئيسي (Main Thread)
-    # هذا سيمنع خطأ set_wakeup_fd نهائياً
     if TELEGRAM_TOKEN:
-        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(lang_handler, pattern="^lang_"))
-        application.run_polling()
-    else:
-        # في حال عدم وجود توكن، نبقي السيرفر يعمل
-        flask_thread.join()
+        threading.Thread(target=run_bot_thread, daemon=True).start()
+    
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host='0.0.0.0', port=port)
