@@ -1,4 +1,4 @@
-asyncio
+import asyncio
 from datetime import datetime
 import json
 import logging
@@ -10,6 +10,7 @@ import threading
 from flask import Flask, Response, render_template_string, request
 from telethon import Button, TelegramClient, events
 from telethon.errors.rpcerrorlist import FloodWaitError, UserNotParticipantError
+from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.tl.types import (
     KeyboardButtonWebView,
@@ -144,7 +145,13 @@ CLIENT_PARAMS = {
     'auto_reconnect': True,
 }
 
-client = TelegramClient('session_user', API_ID, API_HASH, **CLIENT_PARAMS)
+# استخدام StringSession لجلب الجلسة من متغير البيئة SESSION_STRING لمنع مشاكل الملفات على Railway
+client = TelegramClient(
+    StringSession(os.environ.get('SESSION_STRING', '')),
+    API_ID,
+    API_HASH,
+    **CLIENT_PARAMS,
+)
 sytc_bot = TelegramClient('session_sytcbot', API_ID, API_HASH, **CLIENT_PARAMS)
 
 USER_MODES = {}
