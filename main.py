@@ -102,7 +102,8 @@ def stream():
 
 def run_flask_server():
   logging.getLogger('werkzeug').setLevel(logging.ERROR)
-  flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+  port = int(os.environ.get('PORT', 5000))
+  flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 
 # =======================================================
